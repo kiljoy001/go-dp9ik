@@ -31,11 +31,33 @@ import (
 var cgoMutex sync.Mutex
 
 const (
-	ANAMELEN  = 28
-	DOMLEN    = 48
-	CHALLEN   = 8
-	NONCELEN  = 32
-	AuthPAK   = 19
+	ANAMELEN = 28
+	DOMLEN   = 48
+	CHALLEN  = 8
+	NONCELEN = 32
+
+	AuthTreq   = 1
+	AuthChal   = 2
+	AuthPass   = 3
+	AuthOK     = 4
+	AuthErr    = 5
+	AuthMod    = 6
+	AuthApop   = 7
+	AuthOKvar  = 9
+	AuthChap   = 10
+	AuthMSchap = 11
+	AuthCram   = 12
+	AuthHttp   = 13
+	AuthVNC    = 14
+	AuthPAK    = 19
+
+	AuthTs = 64
+	AuthTc = 65
+	AuthAs = 66
+	AuthAc = 67
+	AuthTp = 68
+	AuthHr = 69
+
 	TICKREQLEN = 141
 )
 
@@ -79,6 +101,26 @@ func (tr *Ticketreq) Marshal() ([]byte, error) {
 	return buf[:n], nil
 }
 
+// UnmarshalTicketreq decodes a Ticketreq from wire format.
+func UnmarshalTicketreq(buf []byte) (*Ticketreq, int, error) {
+	if len(buf) == 0 {
+		return nil, 0, &AuthError{Msg: "empty Ticketreq buffer"}
+	}
+
+	cgoMutex.Lock()
+	defer cgoMutex.Unlock()
+
+	tr := &Ticketreq{}
+	ctr := (*C.struct_Ticketreq)(unsafe.Pointer(tr))
+
+	ret := C.convM2TR((*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf)), ctr)
+	if ret <= 0 {
+		return nil, int(ret), &AuthError{Msg: "convM2TR failed"}
+	}
+
+	return tr, int(ret), nil
+}
+
 // AuthError represents an authentication error
 type AuthError struct {
 	Msg string
@@ -90,15 +132,15 @@ func (e *AuthError) Error() string {
 
 // Additional constants from authsrv.h
 const (
-	DESKEYLEN   = 7
-	AESKEYLEN   = 16
-	PAKKEYLEN   = 32
-	PAKSLEN     = (448 + 7) / 8  // 56
-	PAKPLEN     = 4 * PAKSLEN     // 224
-	PAKHASHLEN  = 2 * PAKPLEN     // 448
-	PAKXLEN     = PAKSLEN         // 56
-	PAKYLEN     = PAKSLEN         // 56
-	MAXTICKETLEN = 12 + CHALLEN + 2*ANAMELEN + NONCELEN + 16
+	DESKEYLEN     = 7
+	AESKEYLEN     = 16
+	PAKKEYLEN     = 32
+	PAKSLEN       = (448 + 7) / 8 // 56
+	PAKPLEN       = 4 * PAKSLEN   // 224
+	PAKHASHLEN    = 2 * PAKPLEN   // 448
+	PAKXLEN       = PAKSLEN       // 56
+	PAKYLEN       = PAKSLEN       // 56
+	MAXTICKETLEN  = 12 + CHALLEN + 2*ANAMELEN + NONCELEN + 16
 	MAXAUTHENTLEN = 12 + CHALLEN + NONCELEN + 16
 )
 
@@ -209,8 +251,12 @@ func (p *PAKpriv) AuthPAKFinish(k *Authkey, peerY []byte) error {
 	return nil
 }
 
-// UnmarshalTicket decrypts and unmarshals a ticket from wire format
-func UnmarshalTicket(k *Authkey, buf []byte) (*Ticket, error) {
+// UnmarshalTicketWithLength decrypts a ticket and returns the number of bytes consumed.
+func UnmarshalTicketWithLength(k *Authkey, buf []byte) (*Ticket, int, error) {
+	if len(buf) == 0 {
+		return nil, 0, &AuthError{Msg: "empty ticket buffer"}
+	}
+
 	cgoMutex.Lock()
 	defer cgoMutex.Unlock()
 
@@ -221,10 +267,16 @@ func UnmarshalTicket(k *Authkey, buf []byte) (*Ticket, error) {
 	ret := C.convM2T((*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf)), cticket, ckey)
 
 	if ret <= 0 {
-		return nil, &AuthError{Msg: "convM2T failed"}
+		return nil, int(ret), &AuthError{Msg: "convM2T failed"}
 	}
 
-	return ticket, nil
+	return ticket, int(ret), nil
+}
+
+// UnmarshalTicket decrypts and unmarshals a ticket from wire format.
+func UnmarshalTicket(k *Authkey, buf []byte) (*Ticket, error) {
+	ticket, _, err := UnmarshalTicketWithLength(k, buf)
+	return ticket, err
 }
 
 // MarshalTicket encrypts and marshals a ticket to wire format
@@ -245,9 +297,13 @@ func (t *Ticket) Marshal(k *Authkey) ([]byte, error) {
 	return buf[:n], nil
 }
 
-// UnmarshalAuthenticator decrypts and unmarshals an authenticator from wire format
-// Uses the ticket's key field for decryption
-func UnmarshalAuthenticator(t *Ticket, buf []byte) (*Authenticator, error) {
+// UnmarshalAuthenticatorWithLength decrypts an authenticator and returns the number of bytes consumed.
+// Uses the ticket's key field for decryption.
+func UnmarshalAuthenticatorWithLength(t *Ticket, buf []byte) (*Authenticator, int, error) {
+	if len(buf) == 0 {
+		return nil, 0, &AuthError{Msg: "empty authenticator buffer"}
+	}
+
 	cgoMutex.Lock()
 	defer cgoMutex.Unlock()
 
@@ -258,10 +314,17 @@ func UnmarshalAuthenticator(t *Ticket, buf []byte) (*Authenticator, error) {
 	ret := C.convM2A((*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf)), cauth, cticket)
 
 	if ret <= 0 {
-		return nil, &AuthError{Msg: "convM2A failed"}
+		return nil, int(ret), &AuthError{Msg: "convM2A failed"}
 	}
 
-	return auth, nil
+	return auth, int(ret), nil
+}
+
+// UnmarshalAuthenticator decrypts and unmarshals an authenticator from wire format.
+// Uses the ticket's key field for decryption.
+func UnmarshalAuthenticator(t *Ticket, buf []byte) (*Authenticator, error) {
+	auth, _, err := UnmarshalAuthenticatorWithLength(t, buf)
+	return auth, err
 }
 
 // Marshal encrypts and marshals an authenticator to wire format
