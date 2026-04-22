@@ -7,11 +7,19 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	dp9ik "github.com/kiljoy001/go-dp9ik"
 )
 
-const maxP9AnyMessage = 4096
+const (
+	maxP9AnyMessage  = 4096
+	handshakeTimeout = 5 * time.Second
+)
+
+type deadliner interface {
+	SetDeadline(time.Time) error
+}
 
 // Config describes the server-side 9front auth key used to verify clients.
 type Config struct {
@@ -32,6 +40,10 @@ func (c Config) Validate() error {
 }
 
 // AuthFunc adapts Handshake to go9p/fs.WithAuth and similar hooks.
+//
+// If rw supports SetDeadline, the returned function applies a bounded
+// handshake timeout automatically. Callers using transports without SetDeadline
+// support must enforce their own read and write deadlines externally.
 func AuthFunc(cfg Config) func(io.ReadWriter) (string, error) {
 	return func(rw io.ReadWriter) (string, error) {
 		return Handshake(rw, cfg)
@@ -40,9 +52,24 @@ func AuthFunc(cfg Config) func(io.ReadWriter) (string, error) {
 
 // Handshake runs the server side of the p9any plus dp9ik auth-file exchange
 // and returns the authenticated user on success.
+//
+// If rw supports SetDeadline, Handshake applies a temporary handshake deadline
+// and clears it before returning. Callers using transports without SetDeadline
+// support must enforce deadlines themselves before invoking Handshake.
+//
+// TODO: Add a context-aware Handshake variant for callers that need
+// cancellation independent of transport deadlines.
 func Handshake(rw io.ReadWriter, cfg Config) (string, error) {
 	if err := cfg.Validate(); err != nil {
 		return "", err
+	}
+	if d, ok := rw.(deadliner); ok {
+		if err := d.SetDeadline(time.Now().Add(handshakeTimeout)); err != nil {
+			return "", fmt.Errorf("set handshake deadline: %w", err)
+		}
+		defer func() {
+			_ = d.SetDeadline(time.Time{})
+		}()
 	}
 
 	key, err := dp9ik.PassToKey(cfg.Password)

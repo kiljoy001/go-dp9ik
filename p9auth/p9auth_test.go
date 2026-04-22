@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -61,6 +62,55 @@ func TestHandshake(t *testing.T) {
 	}
 	if res.user != testAuthUser {
 		t.Fatalf("authenticated user = %q, want %q", res.user, testAuthUser)
+	}
+}
+
+func TestHandshakeSetsAndClearsDeadline(t *testing.T) {
+	requireTestAuthServer(t)
+
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+
+	recordingConn := &deadlineRecordingConn{Conn: serverConn}
+
+	type result struct {
+		user string
+		err  error
+	}
+	serverResult := make(chan result, 1)
+
+	go func() {
+		user, err := Handshake(recordingConn, Config{
+			Domain:   testAuthDomain,
+			User:     testAuthUser,
+			Password: testAuthPassword,
+		})
+		serverResult <- result{user: user, err: err}
+		_ = recordingConn.Close()
+	}()
+
+	if err := runTestClientHandshake(clientConn, testAuthPassword); err != nil {
+		t.Fatalf("client handshake failed: %v", err)
+	}
+
+	res := <-serverResult
+	if res.err != nil {
+		t.Fatalf("server handshake failed: %v", res.err)
+	}
+	if res.user != testAuthUser {
+		t.Fatalf("authenticated user = %q, want %q", res.user, testAuthUser)
+	}
+
+	deadlines := recordingConn.Deadlines()
+	if len(deadlines) < 2 {
+		t.Fatalf("expected handshake to set and clear deadline, got %d calls", len(deadlines))
+	}
+	if deadlines[0].IsZero() {
+		t.Fatalf("expected first deadline to be non-zero")
+	}
+	if !deadlines[len(deadlines)-1].IsZero() {
+		t.Fatalf("expected final deadline reset to zero, got %v", deadlines[len(deadlines)-1])
 	}
 }
 
@@ -305,4 +355,24 @@ func readServerAuthenticator(r io.Reader, ticket *dp9ik.Ticket) (*dp9ik.Authenti
 	}
 
 	return nil, fmt.Errorf("server authenticator exceeded %d bytes", limit)
+}
+
+type deadlineRecordingConn struct {
+	net.Conn
+	mu        sync.Mutex
+	deadlines []time.Time
+}
+
+func (c *deadlineRecordingConn) SetDeadline(t time.Time) error {
+	c.mu.Lock()
+	c.deadlines = append(c.deadlines, t)
+	c.mu.Unlock()
+	return c.Conn.SetDeadline(t)
+}
+
+func (c *deadlineRecordingConn) Deadlines() []time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return append([]time.Time(nil), c.deadlines...)
 }
