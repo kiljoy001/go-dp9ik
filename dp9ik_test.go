@@ -4,19 +4,49 @@ import (
 	"crypto/rand"
 	"io"
 	"net"
+	"os"
+	"strings"
 	"testing"
 	"time"
 	"unsafe"
 )
 
-const (
-	testAuthServer = "Authomatic.rentonsoftworks.coin:567"
-	testUser       = "scott"
-	testPassword   = "REDACTED_TEST_PASSWORD"
+var (
+	testAuthServer = os.Getenv("DP9IK_TEST_AUTH_SERVER")
+	testUser       = os.Getenv("DP9IK_TEST_AUTH_USER")
+	testPassword   = os.Getenv("DP9IK_TEST_AUTH_PASSWORD")
 )
+
+func requireLiveAuthServer(t *testing.T) {
+	t.Helper()
+
+	if testAuthServer == "" {
+		t.Skip("live auth tests require DP9IK_TEST_AUTH_SERVER")
+	}
+}
+
+func requireLiveAuthCredentials(t *testing.T) {
+	t.Helper()
+
+	var missing []string
+	if testAuthServer == "" {
+		missing = append(missing, "DP9IK_TEST_AUTH_SERVER")
+	}
+	if testUser == "" {
+		missing = append(missing, "DP9IK_TEST_AUTH_USER")
+	}
+	if testPassword == "" {
+		missing = append(missing, "DP9IK_TEST_AUTH_PASSWORD")
+	}
+	if len(missing) > 0 {
+		t.Skipf("live auth tests require %s", strings.Join(missing, ", "))
+	}
+}
 
 // Test 1: Can we connect to the auth server?
 func TestConnectToAuthServer(t *testing.T) {
+	requireLiveAuthServer(t)
+
 	conn, err := net.DialTimeout("tcp", testAuthServer, 5*time.Second)
 	if err != nil {
 		t.Fatalf("Failed to connect to auth server %s: %v", testAuthServer, err)
@@ -28,6 +58,8 @@ func TestConnectToAuthServer(t *testing.T) {
 
 // Test 2: Server should accept connection and not immediately close it
 func TestAuthServerResponsive(t *testing.T) {
+	requireLiveAuthServer(t)
+
 	conn, err := net.DialTimeout("tcp", testAuthServer, 5*time.Second)
 	if err != nil {
 		t.Fatalf("Failed to connect: %v", err)
@@ -60,6 +92,8 @@ func TestAuthServerResponsive(t *testing.T) {
 
 // Test 3: Send a raw Ticketreq and observe response
 func TestSendRawTicketreq(t *testing.T) {
+	requireLiveAuthServer(t)
+
 	conn, err := net.DialTimeout("tcp", testAuthServer, 5*time.Second)
 	if err != nil {
 		t.Fatalf("Failed to connect: %v", err)
@@ -85,7 +119,7 @@ func TestSendRawTicketreq(t *testing.T) {
 	// authid = "" (auth server id - usually empty for client request)
 	// Already zero
 
-	// authdom = "rentonsoftworks.coin" or similar
+	// authdom = "example.test" or similar
 	copy(buf[1:1+28], []byte(""))
 
 	// chal = random 8 bytes (server challenge - we don't have one yet, use zeros)
@@ -94,8 +128,8 @@ func TestSendRawTicketreq(t *testing.T) {
 	// hostid = "drawterm" or client machine name
 	copy(buf[1+28+48+8:1+28+48+8+28], []byte("go-client"))
 
-	// uid = "scott"
-	copy(buf[1+28+48+8+28:1+28+48+8+28+28], []byte("scott"))
+	// uid = any requested user identity
+	copy(buf[1+28+48+8+28:1+28+48+8+28+28], []byte("testuser"))
 
 	t.Logf("Sending Ticketreq: %x", buf)
 
@@ -133,12 +167,14 @@ func TestSendRawTicketreq(t *testing.T) {
 
 // Test 4: Compare C implementation with manual marshaling and test against server
 func TestTicketreqMarshal_C(t *testing.T) {
+	requireLiveAuthCredentials(t)
+
 	tr := &Ticketreq{
 		Type: AuthPAK,
 	}
 
 	copy(tr.Hostid[:], []byte("go-client"))
-	copy(tr.Uid[:], []byte("scott"))
+	copy(tr.Uid[:], []byte(testUser))
 
 	// Marshal using C implementation
 	buf, err := tr.Marshal()
@@ -184,10 +220,10 @@ func TestTicketreqMarshalUnmarshal(t *testing.T) {
 		Type: AuthPAK,
 	}
 	copy(tr.Authid[:], []byte("authid"))
-	copy(tr.Authdom[:], []byte("rentonsoftworks.coin"))
+	copy(tr.Authdom[:], []byte("example.test"))
 	copy(tr.Chal[:], []byte("chal1234"))
 	copy(tr.Hostid[:], []byte("client"))
-	copy(tr.Uid[:], []byte("scott"))
+	copy(tr.Uid[:], []byte("testuser"))
 
 	buf, err := tr.Marshal()
 	if err != nil {
@@ -275,7 +311,7 @@ func TestStructSizes(t *testing.T) {
 
 // Test 6: Password to key derivation
 func TestPassToKey(t *testing.T) {
-	key, err := PassToKey(testPassword)
+	key, err := PassToKey("testpassword")
 	if err != nil {
 		t.Fatalf("PassToKey failed: %v", err)
 	}
@@ -299,6 +335,8 @@ func TestPassToKey(t *testing.T) {
 
 // Test 7: Full AuthPAK authentication flow
 func TestAuthPAKFullFlow(t *testing.T) {
+	requireLiveAuthCredentials(t)
+
 	// Step 1: Derive key from password
 	key, err := PassToKey(testPassword)
 	if err != nil {
@@ -469,6 +507,8 @@ func TestConnectInvalidServer(t *testing.T) {
 
 // Test 9: Wrong password should cause AuthPAK to fail
 func TestWrongPassword(t *testing.T) {
+	requireLiveAuthCredentials(t)
+
 	// Use wrong password
 	wrongPassword := "WrongPassword123"
 
@@ -541,7 +581,7 @@ func TestWrongPassword(t *testing.T) {
 
 // Test 10: Invalid Y length should fail
 func TestInvalidYLength(t *testing.T) {
-	key, err := PassToKey(testPassword)
+	key, err := PassToKey("testpassword")
 	if err != nil {
 		t.Fatalf("PassToKey failed: %v", err)
 	}
@@ -565,6 +605,8 @@ func TestInvalidYLength(t *testing.T) {
 
 // Test 11: Empty username
 func TestEmptyUsername(t *testing.T) {
+	requireLiveAuthServer(t)
+
 	conn, err := net.DialTimeout("tcp", testAuthServer, 5*time.Second)
 	if err != nil {
 		t.Fatalf("Failed to connect: %v", err)
@@ -620,6 +662,8 @@ func TestConnectionTimeout(t *testing.T) {
 
 // Test 13: Server disconnect during AuthPAK
 func TestServerDisconnectDuringPAK(t *testing.T) {
+	requireLiveAuthCredentials(t)
+
 	// Connect and send ticketreq
 	conn, err := net.DialTimeout("tcp", testAuthServer, 5*time.Second)
 	if err != nil {
@@ -691,6 +735,8 @@ func TestCompileTimeSizeChecks(t *testing.T) {
 
 // Test 15: Concurrent authentication attempts (thread safety)
 func TestConcurrentAuth(t *testing.T) {
+	requireLiveAuthCredentials(t)
+
 	const numGoroutines = 10
 
 	done := make(chan bool, numGoroutines)
@@ -788,6 +834,8 @@ func TestConcurrentAuth(t *testing.T) {
 
 // Test 17: Complete authentication flow with ticket retrieval
 func TestCompleteAuth(t *testing.T) {
+	requireLiveAuthCredentials(t)
+
 	// Step 1-2: Derive key and hash
 	key, err := PassToKey(testPassword)
 	if err != nil {

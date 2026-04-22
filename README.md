@@ -74,7 +74,11 @@ auth := p9auth.AuthFunc(p9auth.Config{
 This library is developed using TDD against a live 9front auth server.
 
 ```bash
-go test -v
+export DP9IK_TEST_AUTH_SERVER=auth.example:567
+export DP9IK_TEST_AUTH_DOMAIN=example.com
+export DP9IK_TEST_AUTH_USER=test-user
+export DP9IK_TEST_AUTH_PASSWORD=secret
+go test -v ./...
 ```
 
 ### Test Coverage

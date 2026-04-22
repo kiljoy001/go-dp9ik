@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -13,15 +15,38 @@ import (
 	dp9ik "github.com/kiljoy001/go-dp9ik"
 )
 
-const (
-	testAuthServerAddr = "Authomatic.rentonsoftworks.coin:567"
-	testAuthDomain     = "rentonsoftworks.coin"
-	testAuthUser       = "scott"
-	testAuthPassword   = "REDACTED_TEST_PASSWORD"
+var (
+	testAuthServerAddr = os.Getenv("DP9IK_TEST_AUTH_SERVER")
+	testAuthDomain     = os.Getenv("DP9IK_TEST_AUTH_DOMAIN")
+	testAuthUser       = os.Getenv("DP9IK_TEST_AUTH_USER")
+	testAuthPassword   = os.Getenv("DP9IK_TEST_AUTH_PASSWORD")
 )
+
+func requireTestAuthConfig(t *testing.T) {
+	t.Helper()
+
+	var missing []string
+	if testAuthServerAddr == "" {
+		missing = append(missing, "DP9IK_TEST_AUTH_SERVER")
+	}
+	if testAuthDomain == "" {
+		missing = append(missing, "DP9IK_TEST_AUTH_DOMAIN")
+	}
+	if testAuthUser == "" {
+		missing = append(missing, "DP9IK_TEST_AUTH_USER")
+	}
+	if testAuthPassword == "" {
+		missing = append(missing, "DP9IK_TEST_AUTH_PASSWORD")
+	}
+	if len(missing) > 0 {
+		t.Skipf("live auth tests require %s", strings.Join(missing, ", "))
+	}
+}
 
 func requireTestAuthServer(t *testing.T) {
 	t.Helper()
+
+	requireTestAuthConfig(t)
 
 	conn, err := net.DialTimeout("tcp", testAuthServerAddr, 2*time.Second)
 	if err != nil {
