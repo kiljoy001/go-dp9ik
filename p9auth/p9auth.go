@@ -1,9 +1,11 @@
 package p9auth
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/rand"
 	"crypto/subtle"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -13,12 +15,20 @@ import (
 )
 
 const (
-	maxP9AnyMessage  = 4096
-	handshakeTimeout = 5 * time.Second
+	maxP9AnyMessage         = 4096
+	handshakeTimeout        = 5 * time.Second
+	maxConsecutiveEmptyRead = 8
+	minTicketMessageLen     = 1 + dp9ik.CHALLEN + 2*dp9ik.ANAMELEN + dp9ik.NONCELEN
+	minAuthenticatorMsgLen  = 1 + dp9ik.CHALLEN + dp9ik.NONCELEN
 )
 
 type deadliner interface {
 	SetDeadline(time.Time) error
+}
+
+type bufferedReader interface {
+	io.Reader
+	ReadSlice(byte) ([]byte, error)
 }
 
 // Config describes the server-side 9front auth key used to verify clients.
@@ -33,8 +43,14 @@ type Config struct {
 
 // Validate reports whether the server-side auth configuration is complete.
 func (c Config) Validate() error {
-	if c.Domain == "" || c.User == "" || c.Password == "" {
-		return fmt.Errorf("domain, user, and password are required")
+	if c.Domain == "" {
+		return fmt.Errorf("missing domain")
+	}
+	if c.User == "" {
+		return fmt.Errorf("missing user")
+	}
+	if c.Password == "" {
+		return fmt.Errorf("missing password")
 	}
 	return nil
 }
@@ -71,6 +87,7 @@ func Handshake(rw io.ReadWriter, cfg Config) (string, error) {
 			_ = d.SetDeadline(time.Time{})
 		}()
 	}
+	reader := ensureBufferedReader(rw)
 
 	key, err := dp9ik.PassToKey(cfg.Password)
 	if err != nil {
@@ -82,7 +99,7 @@ func Handshake(rw io.ReadWriter, cfg Config) (string, error) {
 		return "", fmt.Errorf("write p9any offer: %w", err)
 	}
 
-	choice, err := readCString(rw, maxP9AnyMessage)
+	choice, err := readCString(reader, maxP9AnyMessage)
 	if err != nil {
 		return "", fmt.Errorf("read p9any choice: %w", err)
 	}
@@ -91,7 +108,7 @@ func Handshake(rw io.ReadWriter, cfg Config) (string, error) {
 		return "", fmt.Errorf("unsupported auth choice %q", choice)
 	}
 
-	cchal, err := readFixed(rw, dp9ik.CHALLEN)
+	cchal, err := readFixed(reader, dp9ik.CHALLEN)
 	if err != nil {
 		return "", fmt.Errorf("read client challenge: %w", err)
 	}
@@ -121,7 +138,7 @@ func Handshake(rw io.ReadWriter, cfg Config) (string, error) {
 		return "", fmt.Errorf("write dp9ik offer: %w", err)
 	}
 
-	clientY, err := readFixed(rw, dp9ik.PAKYLEN)
+	clientY, err := readFixed(reader, dp9ik.PAKYLEN)
 	if err != nil {
 		return "", fmt.Errorf("read client pak y: %w", err)
 	}
@@ -129,7 +146,7 @@ func Handshake(rw io.ReadWriter, cfg Config) (string, error) {
 		return "", fmt.Errorf("finish authpak: %w", err)
 	}
 
-	ticket, auth, err := readClientTicketAndAuthenticator(rw, key)
+	ticket, auth, err := readClientTicketAndAuthenticator(reader, key)
 	if err != nil {
 		return "", fmt.Errorf("read client ticket: %w", err)
 	}
@@ -171,25 +188,40 @@ func readClientTicketAndAuthenticator(r io.Reader, key *dp9ik.Authkey) (*dp9ik.T
 	limit := dp9ik.MAXTICKETLEN + dp9ik.MAXAUTHENTLEN
 	buf := make([]byte, 0, limit)
 	chunk := make([]byte, 256)
+	reader := ensureBufferedReader(r)
+	var (
+		ticket     *dp9ik.Ticket
+		ticketLen  int
+		emptyReads int
+	)
 
 	for len(buf) <= limit {
-		if len(buf) > 0 {
-			ticket, ticketLen, ticketErr := dp9ik.UnmarshalTicketWithLength(key, buf)
+		if ticket == nil && len(buf) >= minTicketMessageLen {
+			decodedTicket, decodedLen, ticketErr := dp9ik.UnmarshalTicketWithLength(key, buf)
 			if ticketErr == nil {
-				auth, _, authErr := dp9ik.UnmarshalAuthenticatorWithLength(ticket, buf[ticketLen:])
-				if authErr == nil {
-					return ticket, auth, nil
-				}
+				ticket = decodedTicket
+				ticketLen = decodedLen
+			}
+		}
+		if ticket != nil && len(buf[ticketLen:]) >= minAuthenticatorMsgLen {
+			auth, _, authErr := dp9ik.UnmarshalAuthenticatorWithLength(ticket, buf[ticketLen:])
+			if authErr == nil {
+				return ticket, auth, nil
 			}
 		}
 
-		n, err := r.Read(chunk)
+		n, err := reader.Read(chunk)
 		if err != nil {
 			return nil, nil, err
 		}
 		if n == 0 {
+			emptyReads++
+			if emptyReads >= maxConsecutiveEmptyRead {
+				return nil, nil, fmt.Errorf("client auth message stalled after %d empty reads", maxConsecutiveEmptyRead)
+			}
 			continue
 		}
+		emptyReads = 0
 		buf = append(buf, chunk[:n]...)
 	}
 
@@ -203,20 +235,36 @@ func readFixed(r io.Reader, n int) ([]byte, error) {
 }
 
 func readCString(r io.Reader, limit int) (string, error) {
+	reader := ensureBufferedReader(r)
 	var out bytes.Buffer
-	var b [1]byte
 
 	for out.Len() < limit {
-		if _, err := io.ReadFull(r, b[:]); err != nil {
+		chunk, err := reader.ReadSlice(0)
+		switch {
+		case err == nil:
+			if out.Len()+len(chunk)-1 >= limit {
+				return "", fmt.Errorf("p9any message exceeded %d bytes", limit)
+			}
+			out.Write(chunk[:len(chunk)-1])
+			return out.String(), nil
+		case errors.Is(err, bufio.ErrBufferFull):
+			if out.Len()+len(chunk) >= limit {
+				return "", fmt.Errorf("p9any message exceeded %d bytes", limit)
+			}
+			out.Write(chunk)
+		default:
 			return "", err
 		}
-		if b[0] == 0 {
-			return out.String(), nil
-		}
-		out.WriteByte(b[0])
 	}
 
 	return "", fmt.Errorf("p9any message exceeded %d bytes", limit)
+}
+
+func ensureBufferedReader(r io.Reader) bufferedReader {
+	if reader, ok := r.(bufferedReader); ok {
+		return reader
+	}
+	return bufio.NewReader(r)
 }
 
 func writeCString(w io.Writer, value string) error {

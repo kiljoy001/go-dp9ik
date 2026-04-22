@@ -2,6 +2,7 @@ package p9auth
 
 import (
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -111,6 +112,59 @@ func TestHandshakeSetsAndClearsDeadline(t *testing.T) {
 	}
 	if !deadlines[len(deadlines)-1].IsZero() {
 		t.Fatalf("expected final deadline reset to zero, got %v", deadlines[len(deadlines)-1])
+	}
+}
+
+func TestConfigValidate(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{
+			name: "missing domain",
+			cfg: Config{
+				User:     "user",
+				Password: "password",
+			},
+			want: "missing domain",
+		},
+		{
+			name: "missing user",
+			cfg: Config{
+				Domain:   "domain",
+				Password: "password",
+			},
+			want: "missing user",
+		},
+		{
+			name: "missing password",
+			cfg: Config{
+				Domain: "domain",
+				User:   "user",
+			},
+			want: "missing password",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.cfg.Validate()
+			if err == nil {
+				t.Fatalf("Validate unexpectedly succeeded")
+			}
+			if err.Error() != tt.want {
+				t.Fatalf("Validate error = %q, want %q", err.Error(), tt.want)
+			}
+		})
+	}
+
+	if err := (Config{
+		Domain:   "domain",
+		User:     "user",
+		Password: "password",
+	}).Validate(); err != nil {
+		t.Fatalf("Validate returned unexpected error: %v", err)
 	}
 }
 
@@ -311,10 +365,11 @@ func readAuthServerTickets(conn net.Conn, clientKey *dp9ik.Authkey) (*dp9ik.Tick
 
 		n, err := conn.Read(chunk)
 		if err != nil {
-			if netErr, ok := err.(net.Error); ok && netErr.Timeout() && clientTicket != nil {
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Timeout() && clientTicket != nil {
 				return clientTicket, append([]byte(nil), buf[ticketLen:]...), nil
 			}
-			if err == io.EOF && clientTicket != nil {
+			if clientTicket != nil && (errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) {
 				return clientTicket, append([]byte(nil), buf[ticketLen:]...), nil
 			}
 			return nil, nil, err

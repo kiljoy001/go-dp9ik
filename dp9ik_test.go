@@ -221,6 +221,37 @@ func TestTicketreqMarshalUnmarshal(t *testing.T) {
 	}
 }
 
+func TestUnmarshalFailuresReportZeroConsumedBytes(t *testing.T) {
+	tr, n, err := UnmarshalTicketreq([]byte{0xff})
+	if err == nil {
+		t.Fatalf("UnmarshalTicketreq unexpectedly succeeded: %+v", tr)
+	}
+	if n != 0 {
+		t.Fatalf("UnmarshalTicketreq consumed = %d, want 0", n)
+	}
+
+	key, err := PassToKey("testpassword")
+	if err != nil {
+		t.Fatalf("PassToKey failed: %v", err)
+	}
+
+	ticket, n, err := UnmarshalTicketWithLength(key, []byte{0xff})
+	if err == nil {
+		t.Fatalf("UnmarshalTicketWithLength unexpectedly succeeded: %+v", ticket)
+	}
+	if n != 0 {
+		t.Fatalf("UnmarshalTicketWithLength consumed = %d, want 0", n)
+	}
+
+	auth, n, err := UnmarshalAuthenticatorWithLength(&Ticket{}, []byte{0xff})
+	if err == nil {
+		t.Fatalf("UnmarshalAuthenticatorWithLength unexpectedly succeeded: %+v", auth)
+	}
+	if n != 0 {
+		t.Fatalf("UnmarshalAuthenticatorWithLength consumed = %d, want 0", n)
+	}
+}
+
 // Test 5: Verify our struct sizes match C exactly
 func TestStructSizes(t *testing.T) {
 	tests := []struct {

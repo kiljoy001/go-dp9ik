@@ -125,7 +125,7 @@ func UnmarshalTicketreq(buf []byte) (*Ticketreq, int, error) {
 
 	ret := C.convM2TR((*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf)), ctr)
 	if ret <= 0 {
-		return nil, int(ret), &AuthError{Msg: "convM2TR failed"}
+		return nil, 0, &AuthError{Msg: "convM2TR failed"}
 	}
 
 	return tr, int(ret), nil
@@ -298,7 +298,7 @@ func UnmarshalTicketWithLength(k *Authkey, buf []byte) (*Ticket, int, error) {
 	ret := C.convM2T((*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf)), cticket, ckey)
 
 	if ret <= 0 {
-		return nil, int(ret), &AuthError{Msg: "convM2T failed"}
+		return nil, 0, &AuthError{Msg: "convM2T failed"}
 	}
 
 	return ticket, int(ret), nil
@@ -346,7 +346,7 @@ func UnmarshalAuthenticatorWithLength(t *Ticket, buf []byte) (*Authenticator, in
 	ret := C.convM2A((*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf)), cauth, cticket)
 
 	if ret <= 0 {
-		return nil, int(ret), &AuthError{Msg: "convM2A failed"}
+		return nil, 0, &AuthError{Msg: "convM2A failed"}
 	}
 
 	return auth, int(ret), nil

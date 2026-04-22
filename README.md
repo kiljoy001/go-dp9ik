@@ -54,12 +54,16 @@ key.AuthPAKHash(username)
 For a reusable server-side verifier:
 
 ```go
-import "github.com/kiljoy001/go-dp9ik/p9auth"
+import (
+    "os"
+
+    "github.com/kiljoy001/go-dp9ik/p9auth"
+)
 
 auth := p9auth.AuthFunc(p9auth.Config{
-    Domain:   "rentonsoftworks.coin",
-    User:     "scott",
-    Password: "REDACTED_TEST_PASSWORD",
+    Domain:   os.Getenv("AUTH_DOMAIN"),
+    User:     os.Getenv("AUTH_USER"),
+    Password: os.Getenv("AUTH_PASSWORD"),
 })
 
 // Example: pass auth to a 9P server hook such as go9p/fs.WithAuth(auth)
