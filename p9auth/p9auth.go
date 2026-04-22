@@ -15,12 +15,15 @@ const maxP9AnyMessage = 4096
 
 // Config describes the server-side 9front auth key used to verify clients.
 type Config struct {
-	Domain   string
-	User     string
+	// Domain is the auth domain offered during p9any negotiation.
+	Domain string
+	// User is the auth identity used to derive the server key.
+	User string
+	// Password is the auth password used to derive the server key.
 	Password string
 }
 
-// Validate checks whether the server-side auth configuration is complete.
+// Validate reports whether the server-side auth configuration is complete.
 func (c Config) Validate() error {
 	if c.Domain == "" || c.User == "" || c.Password == "" {
 		return fmt.Errorf("domain, user, and password are required")
@@ -35,8 +38,8 @@ func AuthFunc(cfg Config) func(io.ReadWriter) (string, error) {
 	}
 }
 
-// Handshake runs the server side of the p9any + dp9ik auth-file exchange and
-// returns the authenticated user on success.
+// Handshake runs the server side of the p9any plus dp9ik auth-file exchange
+// and returns the authenticated user on success.
 func Handshake(rw io.ReadWriter, cfg Config) (string, error) {
 	if err := cfg.Validate(); err != nil {
 		return "", err

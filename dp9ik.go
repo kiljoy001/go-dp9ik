@@ -30,6 +30,8 @@ import (
 // even though the underlying C code uses stubbed locks.
 var cgoMutex sync.Mutex
 
+// The fixed-width protocol field lengths and authsrv message type constants
+// match 9front's authsrv.h definitions.
 const (
 	ANAMELEN = 28
 	DOMLEN   = 48
@@ -61,20 +63,27 @@ const (
 	TICKREQLEN = 141
 )
 
-// Ticketreq matches the C struct Ticketreq
+// Ticketreq matches 9front's Ticketreq wire structure.
 type Ticketreq struct {
-	Type    byte
-	Authid  [ANAMELEN]byte
+	// Type is the authsrv message type carried by the request.
+	Type byte
+	// Authid is the server-side auth identity.
+	Authid [ANAMELEN]byte
+	// Authdom is the authentication domain.
 	Authdom [DOMLEN]byte
-	Chal    [CHALLEN]byte
-	Hostid  [ANAMELEN]byte
-	Uid     [ANAMELEN]byte
+	// Chal is the challenge carried in the request.
+	Chal [CHALLEN]byte
+	// Hostid is the requesting host identity.
+	Hostid [ANAMELEN]byte
+	// Uid is the end-user identity being authenticated.
+	Uid [ANAMELEN]byte
 }
 
 // Compile-time size check
 const _ = uint(unsafe.Sizeof(Ticketreq{})) - C.sizeof_struct_Ticketreq
 
-// Marshal converts Ticketreq to wire format using C implementation
+// Marshal converts tr to authsrv wire format using the drawterm C
+// implementation.
 func (tr *Ticketreq) Marshal() ([]byte, error) {
 	cgoMutex.Lock()
 	defer cgoMutex.Unlock()
@@ -101,7 +110,8 @@ func (tr *Ticketreq) Marshal() ([]byte, error) {
 	return buf[:n], nil
 }
 
-// UnmarshalTicketreq decodes a Ticketreq from wire format.
+// UnmarshalTicketreq decodes a Ticketreq from authsrv wire format and returns
+// the decoded value plus the number of bytes consumed.
 func UnmarshalTicketreq(buf []byte) (*Ticketreq, int, error) {
 	if len(buf) == 0 {
 		return nil, 0, &AuthError{Msg: "empty Ticketreq buffer"}
@@ -121,16 +131,19 @@ func UnmarshalTicketreq(buf []byte) (*Ticketreq, int, error) {
 	return tr, int(ret), nil
 }
 
-// AuthError represents an authentication error
+// AuthError reports a protocol or cryptographic authentication failure.
 type AuthError struct {
+	// Msg is the human-readable authentication failure.
 	Msg string
 }
 
+// Error returns the authentication failure message.
 func (e *AuthError) Error() string {
 	return e.Msg
 }
 
-// Additional constants from authsrv.h
+// The dp9ik key, hash, and message size constants match 9front's authsrv.h
+// definitions.
 const (
 	DESKEYLEN     = 7
 	AESKEYLEN     = 16
@@ -144,36 +157,52 @@ const (
 	MAXAUTHENTLEN = 12 + CHALLEN + NONCELEN + 16
 )
 
-// Ticket represents a server-issued ticket
+// Ticket represents a decrypted server-issued ticket.
 type Ticket struct {
-	Num  byte
+	// Num is the ticket type, such as AuthTs or AuthTc.
+	Num byte
+	// Chal is the challenge bound to the ticket.
 	Chal [CHALLEN]byte
+	// Cuid is the client user identity carried in the ticket.
 	Cuid [ANAMELEN]byte
+	// Suid is the server user identity carried in the ticket.
 	Suid [ANAMELEN]byte
-	Key  [NONCELEN]byte
+	// Key is the session key established by the ticket.
+	Key [NONCELEN]byte
+	// Form records the key form locally and is not transmitted on the wire.
 	Form byte // not transmitted, local only
 }
 
-// Authenticator for client/server authentication
+// Authenticator represents a client or server authenticator message.
 type Authenticator struct {
-	Num  byte
+	// Num is the authenticator type, such as AuthAc or AuthAs.
+	Num byte
+	// Chal is the challenge echoed back to prove possession of the ticket key.
 	Chal [CHALLEN]byte
+	// Rand carries the authenticator nonce.
 	Rand [NONCELEN]byte
 }
 
-// Authkey holds all key material
+// Authkey holds the derived DES, AES, and AuthPAK key material for a password.
 type Authkey struct {
-	Des     [DESKEYLEN]byte
-	Aes     [AESKEYLEN]byte
-	Pakkey  [PAKKEYLEN]byte
+	// Des is the derived DES key.
+	Des [DESKEYLEN]byte
+	// Aes is the derived AES key.
+	Aes [AESKEYLEN]byte
+	// Pakkey is the derived AuthPAK key.
+	Pakkey [PAKKEYLEN]byte
+	// Pakhash is the derived AuthPAK password hash buffer.
 	Pakhash [PAKHASHLEN]byte
 }
 
-// PAKpriv holds private state for AuthPAK exchange
+// PAKpriv holds the local private state for an AuthPAK exchange.
 type PAKpriv struct {
+	// Isclient records whether the state was initialized for the client side.
 	Isclient int32
-	X        [PAKXLEN]byte
-	Y        [PAKYLEN]byte
+	// X is the private scalar for the AuthPAK exchange.
+	X [PAKXLEN]byte
+	// Y is the public value generated for the AuthPAK exchange.
+	Y [PAKYLEN]byte
 }
 
 // Compile-time size checks for all structs
@@ -184,7 +213,7 @@ const (
 	_ = uint(unsafe.Sizeof(PAKpriv{})) - C.sizeof_struct_PAKpriv
 )
 
-// PassToKey converts password to authentication key
+// PassToKey derives the dp9ik authentication key material for password.
 func PassToKey(password string) (*Authkey, error) {
 	cgoMutex.Lock()
 	defer cgoMutex.Unlock()
@@ -199,7 +228,7 @@ func PassToKey(password string) (*Authkey, error) {
 	return key, nil
 }
 
-// AuthPAKHash derives the hash for AuthPAK
+// AuthPAKHash derives the AuthPAK password hash for username.
 func (k *Authkey) AuthPAKHash(username string) {
 	cgoMutex.Lock()
 	defer cgoMutex.Unlock()
@@ -211,7 +240,8 @@ func (k *Authkey) AuthPAKHash(username string) {
 	C.authpak_hash(ckey, cuser)
 }
 
-// AuthPAKNew initializes AuthPAK exchange
+// AuthPAKNew initializes a new AuthPAK exchange and returns the local public
+// value to send to the peer.
 func (p *PAKpriv) AuthPAKNew(k *Authkey, isClient bool) []byte {
 	cgoMutex.Lock()
 	defer cgoMutex.Unlock()
@@ -230,7 +260,7 @@ func (p *PAKpriv) AuthPAKNew(k *Authkey, isClient bool) []byte {
 	return y
 }
 
-// AuthPAKFinish completes AuthPAK exchange
+// AuthPAKFinish completes the AuthPAK exchange using the peer's public value.
 func (p *PAKpriv) AuthPAKFinish(k *Authkey, peerY []byte) error {
 	if len(peerY) != PAKYLEN {
 		return &AuthError{Msg: "invalid peer Y length"}
@@ -251,7 +281,8 @@ func (p *PAKpriv) AuthPAKFinish(k *Authkey, peerY []byte) error {
 	return nil
 }
 
-// UnmarshalTicketWithLength decrypts a ticket and returns the number of bytes consumed.
+// UnmarshalTicketWithLength decrypts a ticket from buf and returns the decoded
+// ticket plus the number of bytes consumed.
 func UnmarshalTicketWithLength(k *Authkey, buf []byte) (*Ticket, int, error) {
 	if len(buf) == 0 {
 		return nil, 0, &AuthError{Msg: "empty ticket buffer"}
@@ -273,13 +304,13 @@ func UnmarshalTicketWithLength(k *Authkey, buf []byte) (*Ticket, int, error) {
 	return ticket, int(ret), nil
 }
 
-// UnmarshalTicket decrypts and unmarshals a ticket from wire format.
+// UnmarshalTicket decrypts and unmarshals a ticket from authsrv wire format.
 func UnmarshalTicket(k *Authkey, buf []byte) (*Ticket, error) {
 	ticket, _, err := UnmarshalTicketWithLength(k, buf)
 	return ticket, err
 }
 
-// MarshalTicket encrypts and marshals a ticket to wire format
+// Marshal encrypts and marshals t to authsrv wire format using k.
 func (t *Ticket) Marshal(k *Authkey) ([]byte, error) {
 	cgoMutex.Lock()
 	defer cgoMutex.Unlock()
@@ -297,8 +328,9 @@ func (t *Ticket) Marshal(k *Authkey) ([]byte, error) {
 	return buf[:n], nil
 }
 
-// UnmarshalAuthenticatorWithLength decrypts an authenticator and returns the number of bytes consumed.
-// Uses the ticket's key field for decryption.
+// UnmarshalAuthenticatorWithLength decrypts an authenticator from buf using
+// the ticket key and returns the decoded value plus the number of bytes
+// consumed.
 func UnmarshalAuthenticatorWithLength(t *Ticket, buf []byte) (*Authenticator, int, error) {
 	if len(buf) == 0 {
 		return nil, 0, &AuthError{Msg: "empty authenticator buffer"}
@@ -320,15 +352,14 @@ func UnmarshalAuthenticatorWithLength(t *Ticket, buf []byte) (*Authenticator, in
 	return auth, int(ret), nil
 }
 
-// UnmarshalAuthenticator decrypts and unmarshals an authenticator from wire format.
-// Uses the ticket's key field for decryption.
+// UnmarshalAuthenticator decrypts and unmarshals an authenticator from authsrv
+// wire format using the ticket key.
 func UnmarshalAuthenticator(t *Ticket, buf []byte) (*Authenticator, error) {
 	auth, _, err := UnmarshalAuthenticatorWithLength(t, buf)
 	return auth, err
 }
 
-// Marshal encrypts and marshals an authenticator to wire format
-// Uses the ticket's key field for encryption
+// Marshal encrypts and marshals a to authsrv wire format using the ticket key.
 func (a *Authenticator) Marshal(t *Ticket) ([]byte, error) {
 	cgoMutex.Lock()
 	defer cgoMutex.Unlock()
