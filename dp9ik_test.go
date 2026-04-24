@@ -3,48 +3,80 @@ package dp9ik
 import (
 	"crypto/rand"
 	"io"
-	"unsafe"
 	"net"
+	"os"
+	"strings"
 	"testing"
 	"time"
+	"unsafe"
 )
 
-const (
-	testAuthServer = "Authomatic.rentonsoftworks.coin:567"
-	testUser       = "scott"
-	testPassword   = "REDACTED_TEST_PASSWORD"
+var (
+	testAuthServer = os.Getenv("DP9IK_TEST_AUTH_SERVER")
+	testUser       = os.Getenv("DP9IK_TEST_AUTH_USER")
+	testPassword   = os.Getenv("DP9IK_TEST_AUTH_PASSWORD")
 )
+
+func requireLiveAuthServer(t *testing.T) {
+	t.Helper()
+
+	if testAuthServer == "" {
+		t.Skip("live auth tests require DP9IK_TEST_AUTH_SERVER")
+	}
+}
+
+func requireLiveAuthCredentials(t *testing.T) {
+	t.Helper()
+
+	var missing []string
+	if testAuthServer == "" {
+		missing = append(missing, "DP9IK_TEST_AUTH_SERVER")
+	}
+	if testUser == "" {
+		missing = append(missing, "DP9IK_TEST_AUTH_USER")
+	}
+	if testPassword == "" {
+		missing = append(missing, "DP9IK_TEST_AUTH_PASSWORD")
+	}
+	if len(missing) > 0 {
+		t.Skipf("live auth tests require %s", strings.Join(missing, ", "))
+	}
+}
 
 // Test 1: Can we connect to the auth server?
 func TestConnectToAuthServer(t *testing.T) {
+	requireLiveAuthServer(t)
+
 	conn, err := net.DialTimeout("tcp", testAuthServer, 5*time.Second)
 	if err != nil {
 		t.Fatalf("Failed to connect to auth server %s: %v", testAuthServer, err)
 	}
 	defer conn.Close()
-	
+
 	t.Logf("Successfully connected to %s", testAuthServer)
 }
 
 // Test 2: Server should accept connection and not immediately close it
 func TestAuthServerResponsive(t *testing.T) {
+	requireLiveAuthServer(t)
+
 	conn, err := net.DialTimeout("tcp", testAuthServer, 5*time.Second)
 	if err != nil {
 		t.Fatalf("Failed to connect: %v", err)
 	}
 	defer conn.Close()
-	
+
 	// Set a read deadline to see if server sends anything or closes
 	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	
+
 	buf := make([]byte, 1024)
 	n, err := conn.Read(buf)
-	
+
 	// We expect either:
 	// 1. Timeout (server waiting for our request) - GOOD
 	// 2. Some data (server sends challenge) - GOOD
 	// 3. Connection closed immediately - BAD
-	
+
 	if err != nil {
 		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 			t.Logf("Server waiting for request (timeout) - this is expected")
@@ -52,7 +84,7 @@ func TestAuthServerResponsive(t *testing.T) {
 		}
 		t.Logf("Read error: %v", err)
 	}
-	
+
 	if n > 0 {
 		t.Logf("Server sent %d bytes: %x", n, buf[:n])
 	}
@@ -60,52 +92,54 @@ func TestAuthServerResponsive(t *testing.T) {
 
 // Test 3: Send a raw Ticketreq and observe response
 func TestSendRawTicketreq(t *testing.T) {
+	requireLiveAuthServer(t)
+
 	conn, err := net.DialTimeout("tcp", testAuthServer, 5*time.Second)
 	if err != nil {
 		t.Fatalf("Failed to connect: %v", err)
 	}
 	defer conn.Close()
-	
+
 	// Build a Ticketreq manually based on the C structure
 	// struct Ticketreq {
 	//   char type;            // 1 byte
 	//   char authid[28];      // 28 bytes
-	//   char authdom[48];     // 48 bytes  
+	//   char authdom[48];     // 48 bytes
 	//   char chal[8];         // 8 bytes
 	//   char hostid[28];      // 28 bytes
 	//   char uid[28];         // 28 bytes
 	// }
 	// Total: 141 bytes (TICKREQLEN)
-	
+
 	buf := make([]byte, 141)
-	
+
 	// type = AuthPAK (19 from authsrv.h)
 	buf[0] = 19
-	
+
 	// authid = "" (auth server id - usually empty for client request)
 	// Already zero
-	
-	// authdom = "rentonsoftworks.coin" or similar
+
+	// authdom = "example.test" or similar
 	copy(buf[1:1+28], []byte(""))
-	
+
 	// chal = random 8 bytes (server challenge - we don't have one yet, use zeros)
 	// Already zero
-	
+
 	// hostid = "drawterm" or client machine name
 	copy(buf[1+28+48+8:1+28+48+8+28], []byte("go-client"))
-	
-	// uid = "scott"
-	copy(buf[1+28+48+8+28:1+28+48+8+28+28], []byte("scott"))
-	
+
+	// uid = any requested user identity
+	copy(buf[1+28+48+8+28:1+28+48+8+28+28], []byte("testuser"))
+
 	t.Logf("Sending Ticketreq: %x", buf)
-	
+
 	// Send to server
 	n, err := conn.Write(buf)
 	if err != nil {
 		t.Fatalf("Failed to write: %v", err)
 	}
 	t.Logf("Wrote %d bytes", n)
-	
+
 	// Read response
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	resp := make([]byte, 4096)
@@ -113,9 +147,9 @@ func TestSendRawTicketreq(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to read response: %v", err)
 	}
-	
+
 	t.Logf("Server responded with %d bytes: %x", n, resp[:n])
-	
+
 	// Check first byte for response type
 	if n > 0 {
 		switch resp[0] {
@@ -133,34 +167,36 @@ func TestSendRawTicketreq(t *testing.T) {
 
 // Test 4: Compare C implementation with manual marshaling and test against server
 func TestTicketreqMarshal_C(t *testing.T) {
+	requireLiveAuthCredentials(t)
+
 	tr := &Ticketreq{
 		Type: AuthPAK,
 	}
-	
+
 	copy(tr.Hostid[:], []byte("go-client"))
-	copy(tr.Uid[:], []byte("scott"))
-	
+	copy(tr.Uid[:], []byte(testUser))
+
 	// Marshal using C implementation
 	buf, err := tr.Marshal()
 	if err != nil {
 		t.Fatalf("Marshal failed: %v", err)
 	}
-	
+
 	t.Logf("C implementation produced %d bytes: %x", len(buf), buf)
-	
+
 	// Validate against live server
 	conn, err := net.DialTimeout("tcp", testAuthServer, 5*time.Second)
 	if err != nil {
 		t.Fatalf("Failed to connect: %v", err)
 	}
 	defer conn.Close()
-	
+
 	n, err := conn.Write(buf)
 	if err != nil {
 		t.Fatalf("Failed to write: %v", err)
 	}
 	t.Logf("Wrote %d bytes to server", n)
-	
+
 	// Read response
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	resp := make([]byte, 4096)
@@ -168,14 +204,87 @@ func TestTicketreqMarshal_C(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to read response: %v", err)
 	}
-	
+
 	t.Logf("Server responded with %d bytes: %x", n, resp[:n])
-	
+
 	// Server should accept it
 	if n > 0 && resp[0] == 4 {
 		t.Logf("✓ Server accepted C-marshaled Ticketreq (AuthOK)")
 	} else {
 		t.Errorf("Server rejected Ticketreq or sent unexpected response")
+	}
+}
+
+func TestTicketreqMarshalUnmarshal(t *testing.T) {
+	tr := &Ticketreq{
+		Type: AuthPAK,
+	}
+	copy(tr.Authid[:], []byte("authid"))
+	copy(tr.Authdom[:], []byte("example.test"))
+	copy(tr.Chal[:], []byte("chal1234"))
+	copy(tr.Hostid[:], []byte("client"))
+	copy(tr.Uid[:], []byte("testuser"))
+
+	buf, err := tr.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+
+	tr2, n, err := UnmarshalTicketreq(buf)
+	if err != nil {
+		t.Fatalf("UnmarshalTicketreq failed: %v", err)
+	}
+	if n != len(buf) {
+		t.Fatalf("UnmarshalTicketreq length = %d, want %d", n, len(buf))
+	}
+	if tr2.Type != tr.Type {
+		t.Fatalf("Type = %d, want %d", tr2.Type, tr.Type)
+	}
+	if tr2.Authid != tr.Authid {
+		t.Fatalf("Authid mismatch")
+	}
+	if tr2.Authdom != tr.Authdom {
+		t.Fatalf("Authdom mismatch")
+	}
+	if tr2.Chal != tr.Chal {
+		t.Fatalf("Chal mismatch")
+	}
+	if tr2.Hostid != tr.Hostid {
+		t.Fatalf("Hostid mismatch")
+	}
+	if tr2.Uid != tr.Uid {
+		t.Fatalf("Uid mismatch")
+	}
+}
+
+func TestUnmarshalFailuresReportZeroConsumedBytes(t *testing.T) {
+	tr, n, err := UnmarshalTicketreq([]byte{0xff})
+	if err == nil {
+		t.Fatalf("UnmarshalTicketreq unexpectedly succeeded: %+v", tr)
+	}
+	if n != 0 {
+		t.Fatalf("UnmarshalTicketreq consumed = %d, want 0", n)
+	}
+
+	key, err := PassToKey("testpassword")
+	if err != nil {
+		t.Fatalf("PassToKey failed: %v", err)
+	}
+
+	ticket, n, err := UnmarshalTicketWithLength(key, []byte{0xff})
+	if err == nil {
+		t.Fatalf("UnmarshalTicketWithLength unexpectedly succeeded: %+v", ticket)
+	}
+	if n != 0 {
+		t.Fatalf("UnmarshalTicketWithLength consumed = %d, want 0", n)
+	}
+
+	auth, n, err := UnmarshalAuthenticatorWithLength(&Ticket{}, []byte{0xff})
+	if err == nil {
+		t.Fatalf("UnmarshalAuthenticatorWithLength unexpectedly succeeded: %+v", auth)
+	}
+	if n != 0 {
+		t.Fatalf("UnmarshalAuthenticatorWithLength consumed = %d, want 0", n)
 	}
 }
 
@@ -189,11 +298,11 @@ func TestStructSizes(t *testing.T) {
 		{"Ticketreq", unsafe.Sizeof(Ticketreq{}), 141},
 		// Add more as we implement them
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if tt.goSize != uintptr(tt.expected) {
-				t.Errorf("%s size mismatch: Go=%d, expected=%d", 
+				t.Errorf("%s size mismatch: Go=%d, expected=%d",
 					tt.name, tt.goSize, tt.expected)
 			}
 		})
@@ -202,11 +311,11 @@ func TestStructSizes(t *testing.T) {
 
 // Test 6: Password to key derivation
 func TestPassToKey(t *testing.T) {
-	key, err := PassToKey(testPassword)
+	key, err := PassToKey("testpassword")
 	if err != nil {
 		t.Fatalf("PassToKey failed: %v", err)
 	}
-	
+
 	// Key should be non-zero
 	allZero := true
 	for _, b := range key.Aes {
@@ -215,28 +324,30 @@ func TestPassToKey(t *testing.T) {
 			break
 		}
 	}
-	
+
 	if allZero {
 		t.Error("AES key is all zeros - password derivation may have failed")
 	}
-	
+
 	t.Logf("✓ Derived key from password")
 	t.Logf("  AES key (first 8 bytes): %x", key.Aes[:8])
 }
 
 // Test 7: Full AuthPAK authentication flow
 func TestAuthPAKFullFlow(t *testing.T) {
+	requireLiveAuthCredentials(t)
+
 	// Step 1: Derive key from password
 	key, err := PassToKey(testPassword)
 	if err != nil {
 		t.Fatalf("PassToKey failed: %v", err)
 	}
 	t.Logf("✓ Step 1: Derived key from password")
-	
+
 	// Step 2: Generate PAK hash for username
 	key.AuthPAKHash(testUser)
 	t.Logf("✓ Step 2: Generated AuthPAK hash for user %s", testUser)
-	
+
 	// Step 3: Connect to server
 	conn, err := net.DialTimeout("tcp", testAuthServer, 5*time.Second)
 	if err != nil {
@@ -259,7 +370,7 @@ func TestAuthPAKFullFlow(t *testing.T) {
 		Type: AuthPAK,
 	}
 	copy(tr.Authid[:], []byte(testUser))
-	copy(tr.Authdom[:], []byte(""))  // Empty domain for testing
+	copy(tr.Authdom[:], []byte("")) // Empty domain for testing
 	copy(tr.Chal[:], chal)
 	copy(tr.Hostid[:], []byte("go-client"))
 	copy(tr.Uid[:], []byte(testUser))
@@ -396,6 +507,8 @@ func TestConnectInvalidServer(t *testing.T) {
 
 // Test 9: Wrong password should cause AuthPAK to fail
 func TestWrongPassword(t *testing.T) {
+	requireLiveAuthCredentials(t)
+
 	// Use wrong password
 	wrongPassword := "WrongPassword123"
 
@@ -468,7 +581,7 @@ func TestWrongPassword(t *testing.T) {
 
 // Test 10: Invalid Y length should fail
 func TestInvalidYLength(t *testing.T) {
-	key, err := PassToKey(testPassword)
+	key, err := PassToKey("testpassword")
 	if err != nil {
 		t.Fatalf("PassToKey failed: %v", err)
 	}
@@ -492,6 +605,8 @@ func TestInvalidYLength(t *testing.T) {
 
 // Test 11: Empty username
 func TestEmptyUsername(t *testing.T) {
+	requireLiveAuthServer(t)
+
 	conn, err := net.DialTimeout("tcp", testAuthServer, 5*time.Second)
 	if err != nil {
 		t.Fatalf("Failed to connect: %v", err)
@@ -547,6 +662,8 @@ func TestConnectionTimeout(t *testing.T) {
 
 // Test 13: Server disconnect during AuthPAK
 func TestServerDisconnectDuringPAK(t *testing.T) {
+	requireLiveAuthCredentials(t)
+
 	// Connect and send ticketreq
 	conn, err := net.DialTimeout("tcp", testAuthServer, 5*time.Second)
 	if err != nil {
@@ -618,6 +735,8 @@ func TestCompileTimeSizeChecks(t *testing.T) {
 
 // Test 15: Concurrent authentication attempts (thread safety)
 func TestConcurrentAuth(t *testing.T) {
+	requireLiveAuthCredentials(t)
+
 	const numGoroutines = 10
 
 	done := make(chan bool, numGoroutines)
@@ -715,6 +834,8 @@ func TestConcurrentAuth(t *testing.T) {
 
 // Test 17: Complete authentication flow with ticket retrieval
 func TestCompleteAuth(t *testing.T) {
+	requireLiveAuthCredentials(t)
+
 	// Step 1-2: Derive key and hash
 	key, err := PassToKey(testPassword)
 	if err != nil {
@@ -863,9 +984,12 @@ func TestTicketMarshalUnmarshal(t *testing.T) {
 	t.Logf("✓ Marshaled ticket: %d bytes", len(buf))
 
 	// Unmarshal it
-	ticket2, err := UnmarshalTicket(key, buf)
+	ticket2, n, err := UnmarshalTicketWithLength(key, buf)
 	if err != nil {
 		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	if n != len(buf) {
+		t.Fatalf("ticket length = %d, want %d", n, len(buf))
 	}
 
 	// Verify
@@ -909,9 +1033,12 @@ func TestAuthenticatorMarshalUnmarshal(t *testing.T) {
 	t.Logf("✓ Marshaled authenticator: %d bytes", len(buf))
 
 	// Unmarshal it
-	auth2, err := UnmarshalAuthenticator(ticket, buf)
+	auth2, n, err := UnmarshalAuthenticatorWithLength(ticket, buf)
 	if err != nil {
 		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	if n != len(buf) {
+		t.Fatalf("authenticator length = %d, want %d", n, len(buf))
 	}
 
 	// Verify

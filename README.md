@@ -2,7 +2,12 @@
 
 Go library for 9front dp9ik authentication (AuthPAK/SPAKE2-EE on Ed448) using CGo with drawterm's battle-tested crypto implementation.
 
-**Client-side only**: This library implements the client side of the dp9ik protocol for authenticating TO 9front auth servers. It is not a server implementation and cannot replace factotum or act as an authentication server.
+The repository now has two reusable layers:
+
+- `dp9ik`: low-level protocol, crypto, and wire-format primitives
+- `p9auth`: reusable server-side `p9any` + `dp9ik` verifier for 9P services
+
+It is still **not** a standalone 9front auth server and does not replace the auth server itself.
 
 ## Installation
 
@@ -24,10 +29,11 @@ go build
 
 ## Usage
 
-This library is for **client applications** that need to authenticate to 9front auth servers. Use cases include:
-- Custom Plan 9 clients written in Go
-- Tools that need to obtain authentication tickets from 9front
-- Applications interfacing with 9P services that require dp9ik authentication
+This repository is for applications that need to speak `dp9ik` or verify `dp9ik` authentication for 9P services. Use cases include:
+
+- custom Plan 9 clients written in Go
+- tools that need to obtain authentication tickets from 9front
+- 9P services that need to require 9front auth before `attach`
 
 ```go
 import "github.com/kiljoy001/go-dp9ik"
@@ -45,12 +51,34 @@ key.AuthPAKHash(username)
 // See dp9ik_test.go TestAuthPAKFullFlow for complete example
 ```
 
+For a reusable server-side verifier:
+
+```go
+import (
+    "os"
+
+    "github.com/kiljoy001/go-dp9ik/p9auth"
+)
+
+auth := p9auth.AuthFunc(p9auth.Config{
+    Domain:   os.Getenv("AUTH_DOMAIN"),
+    User:     os.Getenv("AUTH_USER"),
+    Password: os.Getenv("AUTH_PASSWORD"),
+})
+
+// Example: pass auth to a 9P server hook such as go9p/fs.WithAuth(auth)
+```
+
 ## Testing
 
 This library is developed using TDD against a live 9front auth server.
 
 ```bash
-go test -v
+export DP9IK_TEST_AUTH_SERVER=auth.example:567
+export DP9IK_TEST_AUTH_DOMAIN=example.com
+export DP9IK_TEST_AUTH_USER=test-user
+export DP9IK_TEST_AUTH_PASSWORD=secret
+go test -v ./...
 ```
 
 ### Test Coverage
@@ -79,8 +107,10 @@ go test -v
 - [x] Complete AuthPAK flow
 - [x] Ticket marshaling/unmarshaling
 - [x] Authenticator marshaling/unmarshaling
+- [x] Server-side `p9any` + `dp9ik` verifier handshake
+- [x] Wrong-password rejection for server-side verifier
 
-**Result: 19/19 tests pass!** (18 against live 9front server, 1 local crypto test)
+**Result:** root package and `p9auth` package tests pass, including live-auth-server coverage.
 
 ## Architecture
 
@@ -106,6 +136,7 @@ go test -v
 - Complete dp9ik/AuthPAK handshake
 - Ticket marshaling/unmarshaling (convT2M, convM2T)
 - Authenticator marshaling/unmarshaling (convA2M, convM2A)
+- Reusable server-side `p9any` negotiation + `dp9ik` verification for 9P auth files
 
 **Thread Safety:**
 - Go mutex protects all CGo calls to C libraries
@@ -131,6 +162,9 @@ The dp9ik (AuthPAK) protocol implements password-authenticated key exchange usin
 go-dp9ik/
 ├── dp9ik.go              # Main library implementation
 ├── dp9ik_test.go         # Comprehensive test suite
+├── p9auth/
+│   ├── p9auth.go         # Reusable server-side verifier
+│   └── p9auth_test.go    # Server-side verifier tests
 ├── struct_sizes_test.go  # Compile-time struct validation
 ├── stubs.c               # POSIX compatibility stubs
 ├── Makefile              # Build system for C libraries
@@ -156,6 +190,7 @@ This library was developed through LLM-assisted programming, using Claude Code t
 - Writing comprehensive tests against a live 9front authentication server
 - Implementing thread safety through Go mutexes protecting C library calls
 - Debugging protocol flows by studying actual network interactions
+- Extracting a reusable server-side verifier for `p9any` + `dp9ik`
 
 All cryptographic implementations and protocol logic come from drawterm's proven C code. The LLM contribution was the Go wrapper layer, build system, and test suite.
 
