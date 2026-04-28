@@ -281,6 +281,24 @@ func (p *PAKpriv) AuthPAKFinish(k *Authkey, peerY []byte) error {
 	return nil
 }
 
+func isValidTicketType(num byte) bool {
+	switch num {
+	case AuthTs, AuthTc, AuthTp:
+		return true
+	default:
+		return false
+	}
+}
+
+func isValidAuthenticatorType(num byte) bool {
+	switch num {
+	case AuthAs, AuthAc:
+		return true
+	default:
+		return false
+	}
+}
+
 // UnmarshalTicketWithLength decrypts a ticket from buf and returns the decoded
 // ticket plus the number of bytes consumed.
 func UnmarshalTicketWithLength(k *Authkey, buf []byte) (*Ticket, int, error) {
@@ -299,6 +317,9 @@ func UnmarshalTicketWithLength(k *Authkey, buf []byte) (*Ticket, int, error) {
 
 	if ret <= 0 {
 		return nil, 0, &AuthError{Msg: "convM2T failed"}
+	}
+	if !isValidTicketType(ticket.Num) {
+		return nil, 0, &AuthError{Msg: "convM2T produced invalid ticket type"}
 	}
 
 	return ticket, int(ret), nil
@@ -347,6 +368,9 @@ func UnmarshalAuthenticatorWithLength(t *Ticket, buf []byte) (*Authenticator, in
 
 	if ret <= 0 {
 		return nil, 0, &AuthError{Msg: "convM2A failed"}
+	}
+	if !isValidAuthenticatorType(auth.Num) {
+		return nil, 0, &AuthError{Msg: "convM2A produced invalid authenticator type"}
 	}
 
 	return auth, int(ret), nil

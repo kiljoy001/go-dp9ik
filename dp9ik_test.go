@@ -1,6 +1,7 @@
 package dp9ik
 
 import (
+	"bytes"
 	"crypto/rand"
 	"io"
 	"net"
@@ -372,7 +373,7 @@ func TestAuthPAKFullFlow(t *testing.T) {
 	copy(tr.Authid[:], []byte(testUser))
 	copy(tr.Authdom[:], []byte("")) // Empty domain for testing
 	copy(tr.Chal[:], chal)
-	copy(tr.Hostid[:], []byte("go-client"))
+	copy(tr.Hostid[:], []byte(testUser))
 	copy(tr.Uid[:], []byte(testUser))
 
 	buf, err := tr.Marshal()
@@ -479,6 +480,21 @@ func TestAuthPAKFullFlow(t *testing.T) {
 	t.Logf("    Num: %d", ticket1.Num)
 	t.Logf("    Cuid: %s", string(ticket1.Cuid[:]))
 	t.Logf("    Suid: %s", string(ticket1.Suid[:]))
+	if ticket1.Num != AuthTc {
+		t.Fatalf("ticket type = %d, want %d", ticket1.Num, AuthTc)
+	}
+	if ticket1.Form != 1 {
+		t.Fatalf("ticket form = %d, want 1", ticket1.Form)
+	}
+	if !bytes.Equal(ticket1.Chal[:], chal) {
+		t.Fatalf("ticket challenge = %x, want %x", ticket1.Chal, chal)
+	}
+	if trimCString(ticket1.Cuid[:]) != testUser {
+		t.Fatalf("ticket cuid = %q, want %q", trimCString(ticket1.Cuid[:]), testUser)
+	}
+	if trimCString(ticket1.Suid[:]) != testUser {
+		t.Fatalf("ticket suid = %q, want %q", trimCString(ticket1.Suid[:]), testUser)
+	}
 
 	t.Logf("")
 	t.Logf("✓✓✓ FULL AUTHENTICATION SUCCESSFUL!")
@@ -859,7 +875,7 @@ func TestCompleteAuth(t *testing.T) {
 	chal := make([]byte, CHALLEN)
 	rand.Read(chal)
 	copy(tr.Chal[:], chal)
-	copy(tr.Hostid[:], []byte("go-client"))
+	copy(tr.Hostid[:], []byte(testUser))
 	copy(tr.Uid[:], []byte(testUser))
 
 	buf, err := tr.Marshal()
@@ -946,6 +962,21 @@ func TestCompleteAuth(t *testing.T) {
 	}
 	t.Logf("✓ Step 6: Ticket decrypted - Num: %d, Form: %d, Cuid: %s",
 		ticket1.Num, ticket1.Form, string(ticket1.Cuid[:]))
+	if ticket1.Num != AuthTc {
+		t.Fatalf("ticket type = %d, want %d", ticket1.Num, AuthTc)
+	}
+	if ticket1.Form != 1 {
+		t.Fatalf("ticket form = %d, want 1", ticket1.Form)
+	}
+	if !bytes.Equal(ticket1.Chal[:], chal) {
+		t.Fatalf("ticket challenge = %x, want %x", ticket1.Chal, chal)
+	}
+	if trimCString(ticket1.Cuid[:]) != testUser {
+		t.Fatalf("ticket cuid = %q, want %q", trimCString(ticket1.Cuid[:]), testUser)
+	}
+	if trimCString(ticket1.Suid[:]) != testUser {
+		t.Fatalf("ticket suid = %q, want %q", trimCString(ticket1.Suid[:]), testUser)
+	}
 
 	t.Logf("")
 	t.Logf("✓✓✓ COMPLETE AUTHENTICATION SUCCESSFUL!")
@@ -1050,6 +1081,46 @@ func TestAuthenticatorMarshalUnmarshal(t *testing.T) {
 	t.Logf("  Num: %d", auth2.Num)
 }
 
+func TestUnmarshalRejectsWrongTicketAndAuthenticatorKeys(t *testing.T) {
+	key := createSharedKey(t, "testpassword", "scott")
+	wrongKey := createSharedKey(t, "wrongpassword", "scott")
+
+	ticket := &Ticket{
+		Num:  AuthTs,
+		Form: 1,
+	}
+	copy(ticket.Chal[:], []byte("chal1234"))
+	copy(ticket.Cuid[:], []byte("scott"))
+	copy(ticket.Suid[:], []byte("bootes"))
+	copy(ticket.Key[:], createPattern(NONCELEN, 7))
+
+	ticketBuf, err := ticket.Marshal(key)
+	if err != nil {
+		t.Fatalf("Marshal ticket failed: %v", err)
+	}
+
+	if _, _, err := UnmarshalTicketWithLength(wrongKey, ticketBuf); err == nil {
+		t.Fatal("UnmarshalTicketWithLength unexpectedly succeeded with wrong key")
+	}
+
+	auth := &Authenticator{
+		Num: AuthAc,
+	}
+	copy(auth.Chal[:], ticket.Chal[:])
+	copy(auth.Rand[:], createPattern(NONCELEN, 33))
+
+	authBuf, err := auth.Marshal(ticket)
+	if err != nil {
+		t.Fatalf("Marshal authenticator failed: %v", err)
+	}
+
+	wrongTicket := *ticket
+	copy(wrongTicket.Key[:], createPattern(NONCELEN, 99))
+	if _, _, err := UnmarshalAuthenticatorWithLength(&wrongTicket, authBuf); err == nil {
+		t.Fatal("UnmarshalAuthenticatorWithLength unexpectedly succeeded with wrong ticket key")
+	}
+}
+
 // Test: Simple ticket request without AuthPAK
 func TestSimpleTicketRequest(t *testing.T) {
 	t.Skip("Server requires AuthPAK - non-AuthPAK authentication not supported")
@@ -1120,4 +1191,47 @@ func TestSimpleTicketRequest(t *testing.T) {
 	} else {
 		t.Logf("  Unknown response type: %d", resp[0])
 	}
+}
+
+func trimCString(value []byte) string {
+	return string(bytes.TrimRight(value, "\x00"))
+}
+
+func createSharedKey(t *testing.T, password, user string) *Authkey {
+	t.Helper()
+
+	clientKey, err := PassToKey(password)
+	if err != nil {
+		t.Fatalf("PassToKey failed: %v", err)
+	}
+	clientKey.AuthPAKHash(user)
+
+	serverKey, err := PassToKey(password)
+	if err != nil {
+		t.Fatalf("PassToKey failed: %v", err)
+	}
+	serverKey.AuthPAKHash(user)
+
+	clientPAK := &PAKpriv{}
+	serverPAK := &PAKpriv{}
+
+	clientY := clientPAK.AuthPAKNew(clientKey, true)
+	serverY := serverPAK.AuthPAKNew(serverKey, false)
+
+	if err := clientPAK.AuthPAKFinish(clientKey, serverY); err != nil {
+		t.Fatalf("AuthPAKFinish failed: %v", err)
+	}
+	if err := serverPAK.AuthPAKFinish(serverKey, clientY); err != nil {
+		t.Fatalf("AuthPAKFinish failed: %v", err)
+	}
+
+	return clientKey
+}
+
+func createPattern(length int, seed byte) []byte {
+	bytes := make([]byte, length)
+	for i := range bytes {
+		bytes[i] = seed + byte(i)
+	}
+	return bytes
 }
